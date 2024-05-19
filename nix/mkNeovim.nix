@@ -3,6 +3,8 @@
   pkgs,
   lib,
   stdenv,
+  # Set by the overlay to ensure we use a compatible version of `wrapNeovimUnstable`
+  pkgs-wrapNeovim ? pkgs,
 }:
 with lib;
   {
@@ -18,7 +20,9 @@ with lib;
     ignoreConfigRegexes ? [],
     extraPackages ? [], # Extra runtime dependencies (e.g. ripgrep, ...)
     # The below arguments can typically be left as their defaults
-    resolvedExtraLuaPackages ? [], # Additional lua packages (not plugins), e.g. from luarocks.org
+    # Additional lua packages (not plugins), e.g. from luarocks.org.
+    # e.g. p: [p.jsregexp]
+    extraLuaPackages ? p: [],
     extraPython3Packages ? p: [], # Additional python 3 packages
     withPython3 ? true, # Build Neovim with Python 3 support?
     withRuby ? false, # Build Neovim with Ruby support?
@@ -55,7 +59,7 @@ with lib;
 
     # This nixpkgs util function creates an attrset
     # that pkgs.wrapNeovimUnstable uses to configure the Neovim build.
-    neovimConfig = pkgs.neovimUtils.makeNeovimConfig {
+    neovimConfig = pkgs-wrapNeovim.neovimUtils.makeNeovimConfig {
       inherit extraPython3Packages withPython3 withRuby withNodeJs viAlias vimAlias;
       plugins = normalizedPlugins;
     };
@@ -101,7 +105,7 @@ with lib;
 
     # The final init.lua content that we pass to the Neovim wrapper.
     # It wraps the user init.lua, prepends the lua lib directory to the RTP
-    # and appends the nvim and after directory to the RTP
+    # and prepends the nvim and after directory to the RTP
     # It also adds logic for bootstrapping dev plugins (for plugin developers)
     initLua =
       ''
@@ -130,10 +134,14 @@ with lib;
         '')
         devPlugins
       )
-      # Append nvim and after directories to the runtimepath
+      # Prepend nvim and after directories to the runtimepath
+      # NOTE: This is done after init.lua,
+      # because of a bug in Neovim that can cause filetype plugins
+      # to be sourced prematurely, see https://github.com/neovim/neovim/issues/19008
+      # We prepend to ensure that user ftplugins are sourced before builtin ftplugins.
       + ''
-        vim.opt.rtp:append('${nvimRtp}/nvim')
-        vim.opt.rtp:append('${nvimRtp}/after')
+        vim.opt.rtp:prepend('${nvimRtp}/nvim')
+        vim.opt.rtp:prepend('${nvimRtp}/after')
       '';
 
     # Add arguments to the Neovim wrapper script
@@ -152,24 +160,21 @@ with lib;
         ''--set LIBSQLITE "${pkgs.sqlite.out}/lib/libsqlite3.so"'')
     );
 
+    luaPackages = pkgs.neovim-unwrapped.lua.pkgs;
+    resolvedExtraLuaPackages = extraLuaPackages luaPackages;
+
     # Native Lua libraries
-    extraMakeWrapperLuaCArgs = optionalString (resolvedExtraLuaPackages != []) ''
-      --suffix LUA_CPATH ";" "${
-        lib.concatMapStringsSep ";" pkgs.luaPackages.getLuaCPath
-        resolvedExtraLuaPackages
-      }"'';
+    extraMakeWrapperLuaCArgs =
+      optionalString (resolvedExtraLuaPackages != [])
+      ''--suffix LUA_CPATH ";" "${concatMapStringsSep ";" luaPackages.getLuaCPath resolvedExtraLuaPackages}"'';
 
     # Lua libraries
     extraMakeWrapperLuaArgs =
       optionalString (resolvedExtraLuaPackages != [])
-      ''
-        --suffix LUA_PATH ";" "${
-          concatMapStringsSep ";" pkgs.luaPackages.getLuaPath
-          resolvedExtraLuaPackages
-        }"'';
+      ''--suffix LUA_PATH ";" "${concatMapStringsSep ";" luaPackages.getLuaPath resolvedExtraLuaPackages}"'';
 
     # wrapNeovimUnstable is the nixpkgs utility function for building a Neovim derivation.
-    neovim-wrapped = pkgs.wrapNeovimUnstable pkgs.neovim-unwrapped (neovimConfig
+    neovim-wrapped = pkgs-wrapNeovim.wrapNeovimUnstable pkgs.neovim-unwrapped (neovimConfig
       // {
         luaRcContent = initLua;
         wrapperArgs =
